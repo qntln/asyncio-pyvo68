@@ -20,27 +20,22 @@
 			link.href = window.location.search.match( /print-pdf/gi ) ? 'css/print/pdf.css' : 'css/print/paper.css';
 			document.getElementsByTagName( 'head' )[0].appendChild( link );
 		</script>
+
+		<style>
+			code mark, code mark * {
+				color: #000 !important;
+			}
+		</style>
 	</head>
 	<body>
 		<div class="reveal">
 			<div class="slides">
 				<section class="intro-slide">
 					<img class="logo" src="img/logo-positive.svg" alt="Quantlane">
-					<h1>Talk title</h1>
-					<h2>Name Surname <span class="divider">|</span> Event name</h2>
-					<h3><span>Month XX, 201X</span></h3>
+					<h1>Ingesting streaming data with asyncio</h1>
+					<h2>Vita Smid <span class="divider">|</span> Pražské PyVo #68</h2>
+					<h3><span>November 16, 2016</span></h3>
 				</section>
-
-
-				<section>
-					<h2>Speaker's personal intro</h2>
-					<ul>
-						<li class="fragment">Stuff</li>
-						<li class="fragment">Stuff</li>
-						<li class="fragment">Stuff</li>
-					</ul>
-				</section>
-
 
 				<section>
 					<h2 class="logo-heading"><img src="img/logo-positive-horizontal.svg" alt="Quantlane"></h2>
@@ -48,35 +43,144 @@
 						<li class="fragment">Small focused team</li>
 						<li class="fragment">We develop a trading platform and strategies</li>
 						<li class="fragment">All back-end code is Python 3.5</li>
-						<li class="fragment">We also like numpy, ReactJS, Redis, Kafka, PostgreSQL, TensorFlow, &hellip;</li>
 					</ul>
 				</section>
 
 
 				<section>
-					<h2>Title</h2>
+					<h2>The problem</h2>
 					<ul>
-						<li class="fragment">Stuff</li>
-						<li class="fragment">Stuff</li>
-						<li class="fragment">Stuff</li>
+						<li class="fragment">A trading platform ingests real-time data from several financial markets at once.</li>
+						<li class="fragment">Various transports and application protocols are used: from <em>binary over TCP</em> to <em>Redis pubsub</em> to <em>XML over long-polled HTTP</em>.</li>
+						<li class="fragment">The platform runs independent strategies (agents) that want to see the data in a homogeneous format and react to it.</li>
 					</ul>
+				</section>
+
+				<section>
+					<img src="img/architecture.png" class="borderless">
+				</section>
+
+				<section>
+					<h2>Starting a data source</h2>
+					<pre><code class="python" data-trim data-noescape>
+class DataSource:
+
+  def start(self) -> None:
+    self._is_running.set() # asyncio.Event
+    self._run_task = asyncio.ensure_future(self._run())
+					</code></pre>
+				</section>
+
+				<section>
+					<h2>Main data source loop</h2>
+					<pre><code class="python" data-trim data-noescape>
+class DataSource:
+
+  async def _run(self) -> None:
+    <mark>async for _ in DelayedLoop(exponential_generator(...)):</mark>
+      try:
+        await self._protocol.connect()
+      except ingress.protocols.base.ProtocolConnectionError:
+        self._logger.exception('Connection error')
+      else:
+        # Restore pre-existing subscriptions
+        await self._recover_subscriptions()
+        <mark># (receiving loop comes in here...)</mark>
+        await self._protocol.disconnect()
+        if not self._is_running.is_set():
+          break
+					</code></pre>
+				</section>
+
+				<section>
+					<h2>Main data source loop:<br>receiving data</h2>
+					<pre><code class="python" data-noescape>  # Receiving loop
+  while True:
+    try:
+      <mark>self._receive_task = asyncio.ensure_future(</mark>
+      <mark>    self._protocol.receive())</mark>
+      raw_data = await self._receive_task
+    except ingress.protocols.base.ProtocolConnectionError:
+      break # Connection failed
+    except <mark>asyncio.CancelledError</mark>:
+      break # Receive loop terminated
+    else:
+      await self._process_raw_message(raw_data)</code></pre>
+				</section>
+
+				<section>
+					<h2>Stopping a data source</h2>
+					<pre><code class="python" data-trim data-noescape>
+class DataSource:
+
+  async def stop(self) -> None:
+    self._is_running.clear()
+    self._receive_task.cancel()
+    await self._run_task
+					</code></pre>
+				</section>
+
+				<section>
+					<h2>Subscriptions</h2>
+					<pre><code class="python" data-trim data-noescape>
+class DataSource:
+
+  async def subscribe(self, key: str) -> None:
+    <mark>async with self._subscribe_locks[key]:</mark>
+      # Omitted: subscription state tracking
+      delays = toolz.take(10, exponential_generator(...))
+      <mark>async for attempt in DelayedLoop(delays):</mark>
+        try:
+          <mark>await self._protocol.subscribe(key)</mark>
+          return
+        except ingress.protocols.base.TransientSubscriptionError:
+          self._logger.error('Transient subscription error for key = {}.', key)
+      else:
+        # Subscription failed completely...
+					</code></pre>
 				</section>
 
 
 				<section>
-					<h2>Code</h2>
+					<h2>Receiving data in protocol</h2>
 					<pre><code class="python" data-trim data-noescape>
-	<mark>print</mark>('Hello world')
+class XYZProtocol:
+
+  async def receive(self) -> bytes:
+    self._read_task = <mark>asyncio.ensure_future(asyncio.wait_for</mark>(
+      self._read(), timeout = self._settings['heartbeat_period'])))
+    try:
+      msg = await self._read_task
+    except <mark>asyncio.CancelledError</mark> as e:
+      raise ProtocolConnectionError() from e
+    except <mark>asyncio.TimeoutError</mark> as e:
+      raise KeepAliveError() from e # No heartbeat came
+    else:
+      self._validate_sequence_id(msg)
+      return msg
 					</code></pre>
+				</section>
+
+
+				<section>
+					<h2>Wrapping it up</h2>
+					<ul>
+						<li class="fragment">Synchronization of connections, subscriptions, and retries “just works” with asyncio.</li>
+						<li class="fragment">
+							How do we break up CPU-bound code, like parsers? <code>asyncio.sleep</code>?
+							<pre><code class="python">await self._process_raw_message(raw_data)</code></pre>
+						</li>
+						<li class="fragment">It is handy to keep task references for later cancelations.</li>
+					</ul>
 				</section>
 
 
 				<section class="thankyou-slide" data-background-color="#000000">
 					<img class="logo" src="img/logo-negative.svg" alt="Quantlane">
 					<br>
-					<h1>Thank you</h1>
+					<h1>Questions?</h1>
 					<h2>
-						<a href="mailto:XXX@quantlane.com"><span class="email-name">name@</span>quantlane.com</a>
+						<a href="mailto:vita@quantlane.com"><span class="email-name">vita@</span>quantlane.com</a>
 					</h2>
 					<h2>
 						<a href="https://twitter.com/quantlane" class="twitter-link">twitter.com/quantlane</a>

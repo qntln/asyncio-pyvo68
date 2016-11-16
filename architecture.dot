@@ -1,0 +1,25 @@
+digraph arch {
+
+	node [ shape = "box"; fontname = "ArialMT" ] "External source" "pubsub" "Agent 1"
+	node [ shape = "oval"; fontname = "ArialMT" ]
+	edge [ fontname = "ArialMT" ]
+
+	"External source" -> "Protocol 1"
+	"Data source 1" -> pubsub [ label = "parsed data" ]
+	pubsub -> "Data source manager" [ label = "data un/subscriptions" ]
+
+	"Agent 1" -> "pubsub" [ label = "un/subscribe requests"]
+	"pubsub" -> "Agent 1" [ label = "parsed data"]
+
+	subgraph cluster_0 {
+		label = "INGRESS"
+		fontname = "ArialMT"
+		color = "#bbbbbb"
+
+		"Protocol 1" -> "Data source 1" [ label = "raw data" ]
+		"Data source 1" -> "Parser 1"
+		"Parser 1" -> "Data source 1"
+		"Data source 1" -> "Dumper 1" [ label = "raw data "]
+		"Data source manager" -> "Data source 1" [ label = "un/subscribe requests" ]
+	}
+}
